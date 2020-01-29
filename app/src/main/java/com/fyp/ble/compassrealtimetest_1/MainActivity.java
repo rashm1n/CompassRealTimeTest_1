@@ -14,6 +14,8 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
+import android.media.AudioManager;
+import android.media.ToneGenerator;
 import android.os.Build;
 import android.os.Bundle;
 import android.speech.tts.TextToSpeech;
@@ -26,6 +28,7 @@ import android.widget.Toast;
 
 import com.fyp.ble.compassrealtimetest_1.BLE.BLTE_Device;
 import com.fyp.ble.compassrealtimetest_1.BLE.Scanner_BLTE;
+import com.fyp.ble.compassrealtimetest_1.ML.Classification;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -40,11 +43,14 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Random;
 
 import static android.Manifest.permission.READ_EXTERNAL_STORAGE;
 import static android.Manifest.permission.WRITE_EXTERNAL_STORAGE;
 
 public class MainActivity extends AppCompatActivity implements SensorEventListener {
+
+    ToneGenerator toneGen1 = new ToneGenerator(AudioManager.STREAM_MUSIC, 100);
 
     private boolean toScan;
     private int requiredDegree = 0;
@@ -52,6 +58,8 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     int sensorCount = 0;
     private SensorManager mSensorManager;
     TextToSpeech tts;
+
+    Button buttonproxy;
 
     //KalmanFilter
     public KalmanFilter kalmanFilter;
@@ -112,28 +120,28 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     public final String MAC_LIST = "[{\n" +
             "  \"MAC\":\"D5:B7:DC:69:CA:AE\",\n" +
             "  \"description\":\"N\",\n" +
-            "  \"angle\":20,\n" +
+            "  \"angle\":270,\n" +
             "  \"isStaircase\":0,\n" +
             "  \"stairs\":0\n" +
             "},\n" +
             "{\n" +
             "  \"MAC\":\"D4:32:FC:B5:F0:B5\",\n" +
             "  \"description\":\"H\",\n" +
-            "  \"angle\":30,\n" +
+            "  \"angle\":280,\n" +
             "  \"isStaircase\":0,\n" +
             "  \"stairs\":0\n" +
             "},\n" +
             "{\n" +
             "  \"MAC\":\"E4:E0:0A:AE:FD:E2\",\n" +
             "  \"description\":\"I\",\n" +
-            "  \"angle\":60,\n" +
+            "  \"angle\":290,\n" +
             "  \"isStaircase\":1,\n" +
             "  \"stairs\":5\n" +
             "},\n" +
             "{\n" +
             "  \"MAC\":\"E9:3C:4A:34:13:FB\",\n" +
             "  \"description\":\"P\",\n" +
-            "  \"angle\":50,\n" +
+            "  \"angle\":270,\n" +
             "  \"isStaircase\":0,\n" +
             "  \"stairs\":0\n" +
             "}]";
@@ -142,11 +150,29 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private boolean isTopofStair = false;
     private int numberOfStairs = 0;
     private boolean toStepCount = false;
+    private boolean isinProximity = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+        mBTDevicesHashMap = new HashMap<>();
+        mBTDevicesArrayList = new ArrayList<>();
+
+        buttonproxy = (Button)findViewById(R.id.buttonProxy);
+
+        buttonproxy.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                isinProximity = true;
+            }
+        });
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+            mBTLeScanner = new Scanner_BLTE(this, 180000, -100);
+        }
+
         toScan = false;
         kalmanFilter = new KalmanFilter(0.008,1);
         needed = (TextView)findViewById(R.id.textViewNeeded);
@@ -270,6 +296,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             public void run() {
                 for (int i =0;i<array.length();i++){
                     try {
+                        isinProximity = false;
                         JSONObject nextBeacon = array.getJSONObject(i);
                         String description = nextBeacon.getString("description");
                         int isStaircase = nextBeacon.getInt("isStaircase");
@@ -288,25 +315,17 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                             }
 
                             nextBeaconMAC = nextBeacon.getString("MAC");
-                            //startScan();
 
-                            //Step Counting
-//                            while (!isArrived){
-//                                while (!isCorrectDir){
-//                                    Log.d("test",".");
-//                                }
-//                                Log.d("test","..");
-//                            }
-
-//                            convertTextToSpeech("go straight");
-                            Thread.sleep(1000);
-                            //while (isinProximity){
+//                          BLE Scanning
+                            startScan();
+                            while (!isinProximity){
+                                Thread.sleep(50);
                                 //kalman
                                 //ML
                                 //result = 1,0
                                 //break
-                            //}
-                            Log.d("test","found direction of node "+ i);
+                            }
+                            Log.d("rush","found direction of node "+ i);
                             toScan=false;
 
                         }
@@ -329,11 +348,14 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                     } catch (JSONException e) {
                         e.printStackTrace();
                         Log.d("test",e.getMessage());
+//                    } catch (InterruptedException e) {
+//                        e.printStackTrace();
+//                        Log.d("test",e.getMessage());
                     } catch (InterruptedException e) {
                         e.printStackTrace();
-                        Log.d("test",e.getMessage());
                     }
                 }
+                beep();
             }
         });
 
@@ -458,13 +480,14 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         mBTLeScanner.stop();
     }
 
-
     public synchronized void addDevice(BluetoothDevice device, int rssi) {
         //set a queue to form a moving average
         // add each one and after adding  run through filter, run through ML model
         // add condition to break the infinite while loop
 
         String address = device.getAddress();
+
+        String ADD = "C4:52:32:5C:31:E7";
         if (!mBTDevicesHashMap.containsKey(address)) {
             BLTE_Device btleDevice = new BLTE_Device(device);
             btleDevice.setRSSI(rssi);
@@ -473,10 +496,24 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
             queue.poll();
             queue.add(rssi);
+            double convertedValue = kalmanFilter.filter(rssi);
+            Random n = new Random();
+            if (address.equals(ADD)){
+                Log.d("rush","found found");
+            }
+
+//            isinProximity = n.nextBoolean();
 
         } else {
             queue.poll();
             queue.add(rssi);
+            double convertedValue = kalmanFilter.filter(rssi);
+            Random n = new Random();
+            if (address.equals(ADD)){
+                Log.d("rush","found found");
+            }
+
+//            isinProximity = n.nextBoolean();
 
             mBTDevicesHashMap.get(address).setRSSI(rssi);
         }
@@ -499,6 +536,10 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     private void convertTextToSpeech(String s) {
         tts.speak(s, TextToSpeech.QUEUE_FLUSH, null);
+    }
+
+    private void beep(){
+        toneGen1.startTone(ToneGenerator.TONE_CDMA_PIP,500);
     }
 
     private void requestPermissionAndContinue() {
