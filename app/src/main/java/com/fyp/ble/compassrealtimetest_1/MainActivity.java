@@ -3,7 +3,7 @@ package com.fyp.ble.compassrealtimetest_1;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
-
+import org.apache.commons.math3.stat.descriptive.moment.StandardDeviation;
 import android.Manifest;
 import android.annotation.TargetApi;
 import android.app.AlertDialog;
@@ -29,14 +29,21 @@ import android.widget.Toast;
 import com.fyp.ble.compassrealtimetest_1.BLE.BLTE_Device;
 import com.fyp.ble.compassrealtimetest_1.BLE.Scanner_BLTE;
 import com.fyp.ble.compassrealtimetest_1.ML.Classification;
+import com.opencsv.CSVWriter;
 
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 import org.w3c.dom.Text;
 
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
 import java.util.ArrayList;
 
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
@@ -61,8 +68,15 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     Button buttonproxy;
 
+    TextView t;
+
     //KalmanFilter
     public KalmanFilter kalmanFilter;
+
+    //ML counter
+    public List<String[]> finalValuelist;
+
+
     //StepCounter
     List<String[]> list1;
     List<String[]> list2;
@@ -81,7 +95,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     public int step = 0;
     //public TextView mStepCounterTextView ;
 
-
+    private FileWriter mFileWriter;
 
 
     private static final int REQUEST_EXTERNAL_STORAGE = 1;
@@ -91,12 +105,18 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     };
 
     Queue<Integer> queue = new LinkedList<>();
+    Queue<Integer> predictionQueue = new LinkedList<>();
 
     //BLE
+    StandardDeviation standardDeviation;
+    double stdValue;
 
     //BLE
     private HashMap<String, BLTE_Device> mBTDevicesHashMap;
     private ArrayList<BLTE_Device> mBTDevicesArrayList;
+//    Queue<Integer> queue = new LinkedList<>();
+
+
     //    ListAdapter_BTLE_Devices adapter;
     private Scanner_BLTE mBTLeScanner;
 
@@ -111,37 +131,23 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     boolean isCorrectDir = false;
     boolean isArrived = false;
-    public String nextBeaconMAC = "";
+    public static String nextBeaconMAC = "";
     TextView needed;
     TextView current;
     TextView now;
 
 
     public final String MAC_LIST = "[{\n" +
-            "  \"MAC\":\"D5:B7:DC:69:CA:AE\",\n" +
+            "  \"MAC\":\"FA:35:76:56:6F:E3\",\n" +
             "  \"description\":\"N\",\n" +
-            "  \"angle\":270,\n" +
+            "  \"angle\":70,\n" +
             "  \"isStaircase\":0,\n" +
             "  \"stairs\":0\n" +
             "},\n" +
             "{\n" +
-            "  \"MAC\":\"D4:32:FC:B5:F0:B5\",\n" +
+            "  \"MAC\":\"C4:52:32:5C:31:E7\",\n" +
             "  \"description\":\"H\",\n" +
-            "  \"angle\":280,\n" +
-            "  \"isStaircase\":0,\n" +
-            "  \"stairs\":0\n" +
-            "},\n" +
-            "{\n" +
-            "  \"MAC\":\"E4:E0:0A:AE:FD:E2\",\n" +
-            "  \"description\":\"I\",\n" +
-            "  \"angle\":290,\n" +
-            "  \"isStaircase\":1,\n" +
-            "  \"stairs\":5\n" +
-            "},\n" +
-            "{\n" +
-            "  \"MAC\":\"E9:3C:4A:34:13:FB\",\n" +
-            "  \"description\":\"P\",\n" +
-            "  \"angle\":270,\n" +
+            "  \"angle\":345,\n" +
             "  \"isStaircase\":0,\n" +
             "  \"stairs\":0\n" +
             "}]";
@@ -152,10 +158,20 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private boolean toStepCount = false;
     private boolean isinProximity = false;
 
+    Classification classification;
+    public boolean stdevflag = false;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+        t = (TextView)findViewById(R.id.textView);
+
+        finalValuelist = new ArrayList<>();
+
+        standardDeviation = new StandardDeviation();
+        classification = new Classification();
 
         mBTDevicesHashMap = new HashMap<>();
         mBTDevicesArrayList = new ArrayList<>();
@@ -311,20 +327,26 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                             toScan = true;
 
                             while (!isCorrectDir){
-                                Log.d("test",".");
+                                Log.d("test","..........");
                             }
 
                             nextBeaconMAC = nextBeacon.getString("MAC");
 
 //                          BLE Scanning
+
+
                             startScan();
                             while (!isinProximity){
                                 Thread.sleep(50);
-                                //kalman
-                                //ML
-                                //result = 1,0
-                                //break
+//                                Log.d("rush","scanning");
+//                                boolean allEqual = predictionQueue.stream().distinct().limit(2).count() <= 1;
+//                                if (allEqual && predictionQueue.element()==1){
+//                                    break;
+//                                }
                             }
+                            stopScan();
+                            convertTextToSpeech("arrived at beacon");
+                            Thread.sleep(3000);
                             Log.d("rush","found direction of node "+ i);
                             toScan=false;
 
@@ -355,7 +377,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                         e.printStackTrace();
                     }
                 }
-                beep();
             }
         });
 
@@ -375,23 +396,33 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
             current.setText("Current degree = "+Integer.toString(degreeInt));
 
-            if (sensorCount==150){
-                if (this.requiredDegree<degreeInt+5 && this.requiredDegree>degreeInt-5){
+            if (sensorCount==100){  //prev value 150
+                if (this.requiredDegree<degreeInt+8 && this.requiredDegree>degreeInt-8){
                     Log.d("test","correct path");
                     isCorrectDir = true;
-                  convertTextToSpeech("go straight");
+                  convertTextToSpeech("straight");
 
 
-                }else if (this.requiredDegree<degreeInt-5){
+                }else if (this.requiredDegree<degreeInt-8 && (degreeInt-8 - this.requiredDegree)<=180){
                     Log.d("test","turn left");
                     isCorrectDir = false;
-                  convertTextToSpeech("turn left");
+                  convertTextToSpeech("left");
 //step counting
 
-                }else if (this.requiredDegree>degreeInt+5){
+                }else if (this.requiredDegree>degreeInt+8 && (this.requiredDegree - degreeInt+8)<180){
                     Log.d("test","turn right");
                     isCorrectDir = false;
-                  convertTextToSpeech("turn right");
+                  convertTextToSpeech("right");
+                }
+                else if (this.requiredDegree>degreeInt+8 && (this.requiredDegree - degreeInt+8)>=180){
+                    Log.d("test","turn left");
+                    isCorrectDir = false;
+                    convertTextToSpeech("left");
+                }
+                else if (this.requiredDegree<degreeInt+8 && (degreeInt-8 - this.requiredDegree)>180){
+                    Log.d("test","turn right");
+                    isCorrectDir = false;
+                    convertTextToSpeech("right");
                 }
                 sensorCount=0;
             }else {
@@ -471,13 +502,38 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     //BLE Scan Methods
     public void startScan() {
+        Log.d("rush","scan started");
         mBTDevicesHashMap.clear();
         mBTDevicesArrayList.clear();
+        predictionQueue.clear();
+        queue.clear();
+
+
+        //change this later
+        for (int i=0;i<10;i++){
+            queue.add(0);
+        }
+
+        Log.d("rush","added to queue");
+
+        for (int i=0;i<3;i++){
+            predictionQueue.add(100);
+        }
+
+        predictionQueue.add(150);
+
+
         mBTLeScanner.start();
     }
 
     public synchronized void stopScan() {
         mBTLeScanner.stop();
+        stdevflag = false;
+        try {
+            writeCSV(finalValuelist);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
     public synchronized void addDevice(BluetoothDevice device, int rssi) {
@@ -485,39 +541,92 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         // add each one and after adding  run through filter, run through ML model
         // add condition to break the infinite while loop
 
+        Log.d("rush","recieved");
+
         String address = device.getAddress();
 
-        String ADD = "C4:52:32:5C:31:E7";
+//        String ADD = "C4:52:32:5C:31:E7";
         if (!mBTDevicesHashMap.containsKey(address)) {
             BLTE_Device btleDevice = new BLTE_Device(device);
             btleDevice.setRSSI(rssi);
             mBTDevicesHashMap.put(address, btleDevice);
             mBTDevicesArrayList.add(btleDevice);
 
-            queue.poll();
-            queue.add(rssi);
-            double convertedValue = kalmanFilter.filter(rssi);
-            Random n = new Random();
-            if (address.equals(ADD)){
-                Log.d("rush","found found");
+            if (address.equals(nextBeaconMAC)){
+                queue.poll();
+                queue.add(rssi);
+                stdValue = getStandardDeviation(queue,10);   //window size
+                double kalmanValue = kalmanFilter.filter(rssi);
+
+
+                int prediction = classification.classify((float) stdValue,(float) kalmanValue);
+                Log.d("rush",(float) stdValue+"");
+                Log.d("rush",(float) kalmanValue+"");
+                Log.d("rush",prediction+"");
+                predictionQueue.poll();
+                predictionQueue.add(prediction);
+                t.setText(prediction+"");
+
+
+                String[] a = new String[4];
+                a[0] = Integer.toString(rssi);
+                a[1] = Double.toString(kalmanValue);
+                a[2] = Double.toString(stdValue);
+                a[3] = Integer.toString(prediction);
+                finalValuelist.add(a);
+
+                boolean allEqual = predictionQueue.stream().distinct().limit(2).count() <= 1;
+                if (allEqual && predictionQueue.element()==0){
+                    isinProximity = true;
+                }
+
+
             }
 
+
+//            Random n = new Random();
+//            if (address.equals(ADD)){
+//                Log.d("rush","found found");
+//            }
 //            isinProximity = n.nextBoolean();
 
         } else {
-            queue.poll();
-            queue.add(rssi);
-            double convertedValue = kalmanFilter.filter(rssi);
-            Random n = new Random();
-            if (address.equals(ADD)){
-                Log.d("rush","found found");
-            }
-
-//            isinProximity = n.nextBoolean();
-
             mBTDevicesHashMap.get(address).setRSSI(rssi);
+            if (address.equals(nextBeaconMAC)){
+                queue.poll();
+                queue.add(rssi);
+                stdValue = getStandardDeviation(queue,10);   //window size
+                double kalmanValue = kalmanFilter.filter(rssi);
+
+
+                int prediction = classification.classify((float) stdValue,(float) kalmanValue);
+                Log.d("rush",(float) stdValue+"");
+                Log.d("rush",(float) kalmanValue+"");
+                Log.d("rush",prediction+"");
+                predictionQueue.poll();
+                predictionQueue.add(prediction);
+                t.setText(prediction+"");
+
+                String[] a = new String[4];
+                a[0] = Integer.toString(rssi);
+                a[1] = Double.toString(kalmanValue);
+                a[2] = Double.toString(stdValue);
+                a[3] = Integer.toString(prediction);
+                finalValuelist.add(a);
+
+                boolean allEqual = predictionQueue.stream().distinct().limit(2).count() <= 1;
+                if (allEqual && predictionQueue.element()==0){
+                    isinProximity = true;
+                }
+
+            }
+            }
+//            Random n = new Random();
+//            if (address.equals(ADD)){
+//                Log.d("rush","found found");
+//            }
+//            isinProximity = n.nextBoolean();
         }
-    }
 
     @Override
     protected void onResume() {
@@ -530,7 +639,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     protected void onDestroy()
     {
         super.onDestroy();
-
         tts.shutdown();
     }
 
@@ -571,17 +679,97 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         }
     }
 
-    private boolean checkPermission() {
+    private float applyMeanFilter(Queue<Integer> queue){
+        float avg = 0;
 
+        for (int i:queue){
+            avg = avg + i;
+        }
+
+        avg = avg /queue.size();
+
+//            r = Math.pow(10.0,(-76.57-avg)/20);
+//            movingAverage.add((float)r);
+
+        return avg;
+    }
+
+    private float pathLossEquation(double val){
+        double result = Math.pow(10,(-73.68-val)/20);
+        return (float)result;
+    }
+
+    private float applyMedianFilter(Queue<Integer> queue){
+        List<Integer> list = new ArrayList<>();
+
+        int[] numArray = new int[queue.size()];
+
+        int count = 0;
+        for (Integer i:queue){
+            numArray[count] = i;
+            count++;
+        }
+
+        Arrays.sort(numArray);
+
+        double median;
+
+        if (numArray.length % 2 == 0)
+            median = ((double)numArray[numArray.length/2] + (double)numArray[numArray.length/2 - 1])/2;
+        else
+            median = (double) numArray[numArray.length/2];
+
+        return (float)median;
+    }
+
+    private double getStandardDeviation(Queue<Integer> numQueue,int windowLength){
+//      Integer.parseInt(windowSize.getText().toString())
+        int c= Collections.frequency(numQueue,0);
+        double std = 0.0;
+        if (c==0){
+            stdevflag=true;
+        }else {
+            Log.d("rush","insidee");
+            double[] stdArray2 = new double[10-c];
+            int k = 0;
+            for (int i : numQueue) {
+                if (i!=0){
+                double val = (double) i;
+                stdArray2[k] = val;
+                k++;
+                }
+            }
+
+            std = standardDeviation.evaluate(stdArray2);
+        }
+
+        if (stdevflag) {
+            double[] stdArray = new double[windowLength];
+            int k = 0;
+            for (int i : numQueue) {
+                double val = (double) i;
+                stdArray[k] = val;
+                k++;
+            }
+
+
+
+            std = standardDeviation.evaluate(stdArray);
+        }
+        return std;
+    }
+
+    private boolean checkPermission() {
         return ContextCompat.checkSelfPermission(this, WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
-                && ContextCompat.checkSelfPermission(this, READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
-                ;
+                && ContextCompat.checkSelfPermission(this, READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED;
     }
 
     private void openActivity() {
         //add your further process after giving permission or to download images from remote server.
     }
 
+
+    // Step Counting Aid Classes
     public class Dictionary<Long> {
         private List<Entry<Long, Double>> set;
 
@@ -597,6 +785,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             }
             return null;
         }
+
 
         public Entry<Long, Double> findMax() {
             Entry<Long, Double> maxEntry = null;
@@ -626,9 +815,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     }
 
-
     public class Entry<K, V> {
-
         private K key;
         private V value;
 
@@ -644,5 +831,38 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         public V value() {
             return value;
         }
+    }
+
+    public void writeCSV(List<String[]> a) throws IOException {
+
+        String topic = "";
+        Random r = new Random();
+        String baseDir = android.os.Environment.getExternalStorageDirectory().getAbsolutePath();
+        Log.d("Write",baseDir);
+        Date date = new Date();
+        String text = Long.toString(date.getTime());
+        String fileName = text+topic+".csv";
+        String filePath = baseDir + File.separator + fileName;
+        File f = new File(filePath);
+        CSVWriter writer;
+        // File exist
+        if(f.exists()&&!f.isDirectory())
+        {
+            mFileWriter = new FileWriter(filePath, true);
+            writer = new CSVWriter(mFileWriter);
+        }
+        else
+        {
+            writer = new CSVWriter(new FileWriter(filePath));
+        }
+
+        for (String[] s:a){
+            writer.writeNext(s);
+        }
+
+        writer.close();
+        Log.d("Write","written");
+        System.out.println("writeeeeeeeeeeeeeeeeee");
+
     }
 }

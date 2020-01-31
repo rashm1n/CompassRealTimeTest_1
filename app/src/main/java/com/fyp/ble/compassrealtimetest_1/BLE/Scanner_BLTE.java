@@ -6,6 +6,8 @@ import android.bluetooth.BluetoothManager;
 import android.content.Context;
 import android.os.Build;
 import android.os.Handler;
+import android.util.Log;
+
 import androidx.annotation.RequiresApi;
 import com.fyp.ble.compassrealtimetest_1.MainActivity;
 
@@ -37,6 +39,7 @@ public class Scanner_BLTE {
     }
 
     public void start() {
+        Log.d("rush","scanninnng");
         scanLeDevice(true);
     }
 
@@ -84,7 +87,7 @@ public class Scanner_BLTE {
                 @Override
                 public synchronized void onLeScan(final BluetoothDevice device, int rssi, final byte[] scanRecord) {
                     final int new_rssi = rssi;
-                    if ((rssi > signalStrength)) {
+                    if ((rssi > signalStrength) && device.getAddress().equals(MainActivity.nextBeaconMAC)) {
                         mHandler.post(new Runnable() {
                             @Override
                             public void run() {
