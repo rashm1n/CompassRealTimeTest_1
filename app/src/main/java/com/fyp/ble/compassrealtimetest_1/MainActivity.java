@@ -10,6 +10,7 @@ import android.app.AlertDialog;
 import android.bluetooth.BluetoothDevice;
 import android.content.DialogInterface;
 import android.content.pm.PackageManager;
+import android.content.res.AssetFileDescriptor;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
@@ -34,11 +35,15 @@ import com.opencsv.CSVWriter;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
+import org.tensorflow.lite.Interpreter;
 import org.w3c.dom.Text;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.nio.MappedByteBuffer;
+import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 
 import java.util.Arrays;
@@ -58,13 +63,13 @@ import static android.Manifest.permission.WRITE_EXTERNAL_STORAGE;
 public class MainActivity extends AppCompatActivity implements SensorEventListener {
 
     ToneGenerator toneGen1 = new ToneGenerator(AudioManager.STREAM_MUSIC, 100);
-
-    private boolean toScan;
+    private volatile boolean toScan;
     private int requiredDegree = 0;
     Button button;
     int sensorCount = 0;
     private SensorManager mSensorManager;
     TextToSpeech tts;
+    TextToSpeech tts2;
 
     Button buttonproxy;
 
@@ -72,6 +77,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     //KalmanFilter
     public KalmanFilter kalmanFilter;
+    public KalmanFilter kalmanFilterForMedian;
 
     //ML counter
     public List<String[]> finalValuelist;
@@ -97,7 +103,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     private FileWriter mFileWriter;
 
-
     private static final int REQUEST_EXTERNAL_STORAGE = 1;
     private static String[] PERMISSIONS_STORAGE = {
             Manifest.permission.READ_EXTERNAL_STORAGE,
@@ -110,6 +115,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     //BLE
     StandardDeviation standardDeviation;
     double stdValue;
+    double medianValue;
 
     //BLE
     private HashMap<String, BLTE_Device> mBTDevicesHashMap;
@@ -119,16 +125,11 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
     //    ListAdapter_BTLE_Devices adapter;
     private Scanner_BLTE mBTLeScanner;
-
     public String[] macList2;
     public String[] descriptionList;
     public Map<String, String> destinations;
-
     public boolean activateButton = false;
-
-
     public String locatedInitialMAC;
-
     boolean isCorrectDir = false;
     boolean isArrived = false;
     public static String nextBeaconMAC = "";
@@ -137,21 +138,44 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     TextView now;
 
 
-    public final String MAC_LIST = "[{\n" +
+    private float[] meanNormalize =  {8.576662618396227f,  -68.04874213836477f};
+    private float[] stdevNormalize = {4.734675544003042f, 3.430752309249155f};
+
+    Interpreter tflite;
+
+    public final String MAC_LIST = "[" +
+            "" +
+            "{\n" +
             "  \"MAC\":\"FA:35:76:56:6F:E3\",\n" +
-            "  \"description\":\"N\",\n" +
+            "  \"description\":\"You arrived to the end of the stairs. Please wait for the direction instructions.\",\n" +
+            "  \"angle\":20,\n" +
+            "  \"isStaircase\":1,\n" +
+            "  \"stairs\":3\n" +
+            "},\n" +
+            "{\n" +
+            "  \"MAC\":\"C4:52:32:5C:31:E7\",\n" +
+            "  \"description\":\"You arrived to the junction. On your front there is the vision lab on your right there is the next junction.\",\n" +
+            "  \"angle\":328,\n" +
+            "  \"isStaircase\":0,\n" +
+            "  \"stairs\":0\n" +
+            "},\n" +
+            "{\n" +
+            "  \"MAC\":\"FA:35:76:56:6F:E3\",\n" +
+            "  \"description\":\"You arrived to the junction 2. Turn to your left, if you want to go to the post graduate or telecomm labs.\",\n" +
             "  \"angle\":70,\n" +
             "  \"isStaircase\":0,\n" +
             "  \"stairs\":0\n" +
             "},\n" +
             "{\n" +
-            "  \"MAC\":\"C4:52:32:5C:31:E7\",\n" +
-            "  \"description\":\"H\",\n" +
+            "  \"MAC\":\"F0:EC:AF:CF:6C:E1\",\n" +
+            "  \"description\":\"Arrived at destination.\",\n" +
             "  \"angle\":345,\n" +
             "  \"isStaircase\":0,\n" +
             "  \"stairs\":0\n" +
-            "}]";
+            "}" +
+            "]";
 
+//    public final String MAC_LIST = "[{\"MAC\":\"FA:35:76:56:6F:E3\",\"description\":\"x x x\",\"angle\":20,\"isStaircase\":1,\"stairs\":24},{\"MAC\":\"FA:35:76:56:6F:E3\",\"description\":\"x x x\",\"angle\":328,\"isStaircase\":0,\"stairs\":0},{\"MAC\":\"C4:52:32:5C:31:E7\",\"description\":\"x x x\",\"angle\":70,\"isStaircase\":,\"stairs\":0}]";
     public JSONArray array;
     private boolean isTopofStair = false;
     private int numberOfStairs = 0;
@@ -161,14 +185,33 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     Classification classification;
     public boolean stdevflag = false;
 
+    int windowLength = 20;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        finalValuelist = new ArrayList<>();
+        String[] a = new String[4];
+        a[0] = "raw rssi";
+        a[1] = "median";
+        a[2] = "std";
+        a[3] = "prediction";
+        finalValuelist.add(a);
+
+
+        try{
+            tflite = new Interpreter(loadModelFile());
+        } catch (IOException e) {
+            Log.d("rush","error");
+            e.printStackTrace();
+        }
+
+
         t = (TextView)findViewById(R.id.textView);
 
-        finalValuelist = new ArrayList<>();
+
 
         standardDeviation = new StandardDeviation();
         classification = new Classification();
@@ -191,6 +234,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
         toScan = false;
         kalmanFilter = new KalmanFilter(0.008,1);
+        kalmanFilterForMedian = new KalmanFilter(0.008,1);
         needed = (TextView)findViewById(R.id.textViewNeeded);
         current = (TextView)findViewById(R.id.textViewCurrent);
         now = (TextView)findViewById(R.id.textViewNow);
@@ -220,10 +264,8 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             System.out.println("BLE NOT SUPPORTED");
             finish();
         }
-
         //stepcounter
         int permission = ActivityCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE);
-
         if (permission != PackageManager.PERMISSION_GRANTED) {
             // We don't have permission so prompt the user
             ActivityCompat.requestPermissions(
@@ -252,7 +294,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             public void onInit(int status) {
                 if(status == TextToSpeech.SUCCESS){
                     int result=tts.setLanguage(Locale.US);
-                    tts.setSpeechRate((float) 0.92);
+                    tts.setSpeechRate((float) 0.90);
 //                    tts.speak("Indoor Navigation Application Opened. Tap Anywhere on the screen to begin initializing", TextToSpeech.QUEUE_FLUSH, null);
 
                     if(result==TextToSpeech.LANG_MISSING_DATA ||
@@ -260,12 +302,31 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                         Log.e("error", "This Language is not supported");
                     }
                 }
-                else
+                else{
                     Log.e("error", "Initilization Failed!");
+                }
             }
         });
 
+        tts2=new TextToSpeech(MainActivity.this, new TextToSpeech.OnInitListener() {
 
+            @Override
+            public void onInit(int status) {
+                if(status == TextToSpeech.SUCCESS){
+                    int result=tts2.setLanguage(Locale.US);
+                    tts2.setSpeechRate((float) 0.90);
+//                    tts.speak("Indoor Navigation Application Opened. Tap Anywhere on the screen to begin initializing", TextToSpeech.QUEUE_FLUSH, null);
+
+                    if(result==TextToSpeech.LANG_MISSING_DATA ||
+                            result==TextToSpeech.LANG_NOT_SUPPORTED){
+                        Log.e("error", "This Language is not supported");
+                    }
+                }
+                else{
+                    Log.e("error", "Initilization Failed!");
+                }
+            }
+        });
 
 
         button = (Button)findViewById(R.id.button);
@@ -274,7 +335,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         if (toScan){
             button.setText("Scan");
         }
-
 
         button.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -289,13 +349,10 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             }
         });
 
-//        button2.setOnClickListener(new View.OnClickListener() {
-//            @Override
-//            public void onClick(View v) {
-//                nodeNumber++;
-//            }
-//        });
 
+        //should give the initialization input here/////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+        //convert MAC string to JSONArray Object
         try {
             array =  new JSONArray(MAC_LIST);
             JSONObject jsonObject = array.getJSONObject(1);
@@ -306,11 +363,11 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         }
 
 
-
         Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
                 for (int i =0;i<array.length();i++){
+                    toScan = false;
                     try {
                         isinProximity = false;
                         JSONObject nextBeacon = array.getJSONObject(i);
@@ -320,8 +377,14 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                         {
                             now.setText("Currently Correcting Angle");
                             int angle = nextBeacon.getInt("angle");
-                            requiredDegree = angle;
+                            requiredDegree = angle;//        button2.setOnClickListener(new View.OnClickListener() {
+//            @Override
+//            public void onClick(View v) {
+//                nodeNumber++;
+//            }
+//        });
                             needed.setText("Needed Angle = "+Integer.toString(angle));
+
                             isCorrectDir = false;
 
                             toScan = true;
@@ -331,10 +394,9 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                             }
 
                             nextBeaconMAC = nextBeacon.getString("MAC");
+                            String beaconDescription = nextBeacon.getString("description");
 
 //                          BLE Scanning
-
-
                             startScan();
                             while (!isinProximity){
                                 Thread.sleep(50);
@@ -345,14 +407,21 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 //                                }
                             }
                             stopScan();
-                            convertTextToSpeech("arrived at beacon");
-                            Thread.sleep(3000);
-                            Log.d("rush","found direction of node "+ i);
                             toScan=false;
+                            Log.d("hash","to scan false speech started");
+                            convertTextToSpeech(beaconDescription);
+                            Log.d("rush","found direction of node "+ i);
+
+                            queue.clear();
+                            //change this later
+                            for (int ii=0;ii<windowLength;ii++){
+                                queue.add(0);
+                            }
 
                         }
                         else
                         {
+                            String beaconDescription = nextBeacon.getString("description");
                             now.setText("Currently Counting Steps");
                             Log.d("test","inelse");
                             isTopofStair = false;
@@ -364,6 +433,9 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                             while (!isTopofStair){
                                 Log.d("test","....");
                             }
+
+                            convertTextToSpeech(beaconDescription);
+
                             toStepCount = false;
                         }
 
@@ -390,36 +462,38 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
         //compass
         if (toScan && event.sensor.getType() == Sensor.TYPE_ORIENTATION){
+
             float degree = Math.round(event.values[0]);
             int degreeInt = (int)degree;
             Log.d("test", Integer.toString(degreeInt));
 
             current.setText("Current degree = "+Integer.toString(degreeInt));
 
-            if (sensorCount==100){  //prev value 150
-                if (this.requiredDegree<degreeInt+8 && this.requiredDegree>degreeInt-8){
+            int allowedThreshould = 5;
+
+            if (sensorCount==80){  //prev value 150
+                Log.d("hash","inside dir");
+                if (this.requiredDegree<degreeInt+allowedThreshould && this.requiredDegree>degreeInt-allowedThreshould){
                     Log.d("test","correct path");
                     isCorrectDir = true;
                   convertTextToSpeech("straight");
 
-
-                }else if (this.requiredDegree<degreeInt-8 && (degreeInt-8 - this.requiredDegree)<=180){
+                }else if (this.requiredDegree<degreeInt-allowedThreshould && (degreeInt-allowedThreshould - this.requiredDegree)<=180){
                     Log.d("test","turn left");
                     isCorrectDir = false;
                   convertTextToSpeech("left");
 //step counting
-
-                }else if (this.requiredDegree>degreeInt+8 && (this.requiredDegree - degreeInt+8)<180){
+                }else if (this.requiredDegree>degreeInt+allowedThreshould && (this.requiredDegree - degreeInt+allowedThreshould)<180){
                     Log.d("test","turn right");
                     isCorrectDir = false;
                   convertTextToSpeech("right");
                 }
-                else if (this.requiredDegree>degreeInt+8 && (this.requiredDegree - degreeInt+8)>=180){
+                else if (this.requiredDegree>degreeInt+allowedThreshould && (this.requiredDegree - degreeInt+allowedThreshould)>=180){
                     Log.d("test","turn left");
                     isCorrectDir = false;
                     convertTextToSpeech("left");
                 }
-                else if (this.requiredDegree<degreeInt+8 && (degreeInt-8 - this.requiredDegree)>180){
+                else if (this.requiredDegree<degreeInt+allowedThreshould && (degreeInt-allowedThreshould - this.requiredDegree)>180){
                     Log.d("test","turn right");
                     isCorrectDir = false;
                     convertTextToSpeech("right");
@@ -506,11 +580,11 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         mBTDevicesHashMap.clear();
         mBTDevicesArrayList.clear();
         predictionQueue.clear();
+
         queue.clear();
 
-
         //change this later
-        for (int i=0;i<10;i++){
+        for (int i=0;i<windowLength;i++){
             queue.add(0);
         }
 
@@ -521,8 +595,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         }
 
         predictionQueue.add(150);
-
-
         mBTLeScanner.start();
     }
 
@@ -555,13 +627,16 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             if (address.equals(nextBeaconMAC)){
                 queue.poll();
                 queue.add(rssi);
-                stdValue = getStandardDeviation(queue,10);   //window size
+
+                stdValue = getStandardDeviation(queue,20);   //window size
+                medianValue = applyMedianFilter(queue);
                 double kalmanValue = kalmanFilter.filter(rssi);
-
-
-                int prediction = classification.classify((float) stdValue,(float) kalmanValue);
+                double kalmanMedianValue = kalmanFilterForMedian.filter(medianValue);
+                int prediction = classify((float) stdValue,(float)medianValue);
+//                int prediction = classify((float) stdValue,(float)kalmanMedianValue);
+//                int prediction = classification.classify((float) stdValue,(float) kalmanValue);
                 Log.d("rush",(float) stdValue+"");
-                Log.d("rush",(float) kalmanValue+"");
+                Log.d("rush",(float) medianValue+"");
                 Log.d("rush",prediction+"");
                 predictionQueue.poll();
                 predictionQueue.add(prediction);
@@ -570,7 +645,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
                 String[] a = new String[4];
                 a[0] = Integer.toString(rssi);
-                a[1] = Double.toString(kalmanValue);
+                a[1] = Double.toString(medianValue);
                 a[2] = Double.toString(stdValue);
                 a[3] = Integer.toString(prediction);
                 finalValuelist.add(a);
@@ -579,11 +654,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
                 if (allEqual && predictionQueue.element()==0){
                     isinProximity = true;
                 }
-
-
             }
-
-
 //            Random n = new Random();
 //            if (address.equals(ADD)){
 //                Log.d("rush","found found");
@@ -595,13 +666,18 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             if (address.equals(nextBeaconMAC)){
                 queue.poll();
                 queue.add(rssi);
-                stdValue = getStandardDeviation(queue,10);   //window size
+                stdValue = getStandardDeviation(queue,20);   //window size
+                medianValue = applyMedianFilter(queue);
                 double kalmanValue = kalmanFilter.filter(rssi);
+                double kalmanMedianValue = kalmanFilterForMedian.filter(medianValue);
+                int prediction = classify((float) stdValue,(float)medianValue);
+//                int prediction = classify((float) stdValue,(float)kalmanMedianValue);
+
+//                int prediction = classification.classify((float) stdValue,(float) kalmanValue);
 
 
-                int prediction = classification.classify((float) stdValue,(float) kalmanValue);
                 Log.d("rush",(float) stdValue+"");
-                Log.d("rush",(float) kalmanValue+"");
+                Log.d("rush",(float) kalmanMedianValue+"");
                 Log.d("rush",prediction+"");
                 predictionQueue.poll();
                 predictionQueue.add(prediction);
@@ -609,7 +685,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
 
                 String[] a = new String[4];
                 a[0] = Integer.toString(rssi);
-                a[1] = Double.toString(kalmanValue);
+                a[1] = Double.toString(medianValue);
                 a[2] = Double.toString(stdValue);
                 a[3] = Integer.toString(prediction);
                 finalValuelist.add(a);
@@ -640,11 +716,56 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     {
         super.onDestroy();
         tts.shutdown();
+        tts2.shutdown();
     }
 
-    private void convertTextToSpeech(String s) {
+    private synchronized void  convertTextToSpeech(String s) {
+        if (!s.equals("left") && !s.equals("right") && !s.equals("straight")){
+            toScan =false;
+        }
+
+
+        Thread t = Thread.currentThread();
+        Log.d("hash",t.getName());
+        Log.d("hash",s);
+
         tts.speak(s, TextToSpeech.QUEUE_FLUSH, null);
+
+        //new code
+
+        while (tts.isSpeaking()){
+            // added a new thread sleep
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+            Log.d("rush",".");
+        }
+        Log.d("hash","speech finished");
+        if (!s.equals("left") && !s.equals("right") && !s.equals("straight")){
+            toScan =true;
+        }
     }
+
+//    private synchronized void  convertTextToSpeech2(String s) {
+//        tts2.speak(s, TextToSpeech.QUEUE_FLUSH, null);
+//
+//        //new code
+//
+//        while (tts2.isSpeaking()){
+//
+//            // added a new thread sleep
+////            try {
+////                Thread.sleep(100);
+////            } catch (InterruptedException e) {
+////                e.printStackTrace();
+////            }
+//            Log.d("rush",".");
+//        }
+//        Log.d("hash","speech finished");
+//        toScan = true;
+//    }
 
     private void beep(){
         toneGen1.startTone(ToneGenerator.TONE_CDMA_PIP,500);
@@ -694,20 +815,43 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         return avg;
     }
 
-    private float pathLossEquation(double val){
-        double result = Math.pow(10,(-73.68-val)/20);
-        return (float)result;
-    }
+//    private float applyMedianFilter(Queue<Integer> queue){
+//        List<Integer> list = new ArrayList<>();
+//
+//        int[] numArray = new int[queue.size()];
+//
+//        int count = 0;
+//        for (Integer i:queue){
+//            numArray[count] = i;
+//            count++;
+//        }
+//
+//        Arrays.sort(numArray);
+//
+//        double median;
+//
+//        if (numArray.length % 2 == 0)
+//            median = ((double)numArray[numArray.length/2] + (double)numArray[numArray.length/2 - 1])/2;
+//        else
+//            median = (double) numArray[numArray.length/2];
+//
+//        return (float)median;
+//    }
 
     private float applyMedianFilter(Queue<Integer> queue){
-        List<Integer> list = new ArrayList<>();
+        int c= Collections.frequency(queue,0);
 
-        int[] numArray = new int[queue.size()];
+
+        int[] numArray = new int[queue.size()-c];
 
         int count = 0;
+
         for (Integer i:queue){
-            numArray[count] = i;
-            count++;
+            if (i!=0) {
+                numArray[count] = i;
+                count++;
+            }
+
         }
 
         Arrays.sort(numArray);
@@ -730,7 +874,7 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
             stdevflag=true;
         }else {
             Log.d("rush","insidee");
-            double[] stdArray2 = new double[10-c];
+            double[] stdArray2 = new double[windowLength-c];
             int k = 0;
             for (int i : numQueue) {
                 if (i!=0){
@@ -767,7 +911,6 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
     private void openActivity() {
         //add your further process after giving permission or to download images from remote server.
     }
-
 
     // Step Counting Aid Classes
     public class Dictionary<Long> {
@@ -864,5 +1007,42 @@ public class MainActivity extends AppCompatActivity implements SensorEventListen
         Log.d("Write","written");
         System.out.println("writeeeeeeeeeeeeeeeeee");
 
+    }
+
+    public int classify(float std, float rssi){
+        float result = doInterference(std,rssi);
+        if (result>0.5){
+            return 1;
+        }else{
+            return 0;
+        }
+    }
+
+    private float doInterference(float std, float rssi){
+        float[] normalized = normalization(std,rssi);
+
+        float[] inputVal = new float[2];
+        inputVal[0] = normalized[0];
+        inputVal[1] = normalized[1];
+
+        float[][] outputval = new  float[1][1];
+        tflite.run(inputVal,outputval);
+        return outputval[0][0];
+    }
+
+    private MappedByteBuffer loadModelFile() throws IOException {
+        AssetFileDescriptor fileDescriptor = this.getAssets().openFd("junc2_median.tflite");
+        FileInputStream inputStream = new FileInputStream((fileDescriptor.getFileDescriptor()));
+        FileChannel fileChannel = inputStream.getChannel();
+        long startoffset = fileDescriptor.getStartOffset();
+        long declaredLength = fileDescriptor.getDeclaredLength();
+        return fileChannel.map(FileChannel.MapMode.READ_ONLY,startoffset,declaredLength);
+    }
+
+    private float[] normalization(float std, float kalman){
+        float normalSTD = (std - meanNormalize[0])/stdevNormalize[0];
+        float normalkalman = (kalman - meanNormalize[1])/stdevNormalize[1];
+        float[] result = {normalSTD,normalkalman};
+        return result;
     }
 }
